@@ -1,0 +1,46 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.5
+      Plane Cell Count: 20
+    - Class: rviz_default_plugins/Axes
+      Name: Origin
+      Enabled: true
+      Length: 0.3
+      Radius: 0.02
+      Reference Frame: map
+    - Class: rviz_default_plugins/MarkerArray
+      Name: PhaseSpace LEDs
+      Enabled: true
+      Topic:
+        Value: /phasespace_leds
+    - Class: rviz_default_plugins/TF
+      Name: Rigid trackers
+      Enabled: true
+      Show Names: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0.5
+      Pitch: 0.6
+      Yaw: 0.8
+Window Geometry:
+  Width: 1400
+  Height: 900

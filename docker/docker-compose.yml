@@ -1,0 +1,31 @@
+# PhaseSpace LED visualization in RViz (ROS 2 Humble).
+# Before first run on the host:  xhost +local:docker
+# Run:                           docker compose -f docker/docker-compose.yml up
+x-ros: &ros
+  image: osrf/ros:humble-desktop
+  network_mode: host   # UDP stream from the PhaseSpace server + DDS between services
+  ipc: host
+  working_dir: /ws
+  volumes:
+    - ..:/ws
+    - /tmp/.X11-unix:/tmp/.X11-unix:rw
+  environment:
+    - DISPLAY=${DISPLAY:-:0}
+    - QT_X11_NO_MITSHM=1
+    - PYTHONDONTWRITEBYTECODE=1
+    - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+
+services:
+  phasespace:
+    <<: *ros
+    command: >
+      bash -c "source /opt/ros/humble/setup.bash &&
+               python3 docker/phasespace_rviz.py
+               --device=${PHASESPACE_DEVICE:-cs-phasespace.cs.umn.edu}
+               --freq=60 --stream=udp"
+
+  rviz:
+    <<: *ros
+    command: >
+      bash -c "source /opt/ros/humble/setup.bash &&
+               rviz2 -d docker/phasespace.rviz"
