@@ -14,6 +14,11 @@ origin on the floor tape, Z up, metres):
 LED groups come from the active session profile: every microdriver in it is
 one group named after the device (e.g. "dhyan-hat" -> LEDs 0-7).
 
+Orientation: `--capture NAME` records group NAME's LED layout (hold it still,
+facing +x / upright) to trackers/NAME.json. While running, each group with a
+reference is fitted to it (Kabsch on matched LED IDs, >= 3 visible), giving the
+group's full pose; without one the TF is the LED centroid with no rotation.
+
 PhaseSpace is millimetres with Y up; ROS is metres with Z up, so positions map
 (x, y, z)_ps -> (x, -z, y) / 1000. Camera optical axis is the camera's local -Z.
 """
@@ -60,6 +65,44 @@ def quat_matrix(w, x, y, z):
     ])
 
 
+def matrix_to_quat(m):
+    """Rotation matrix -> (x, y, z, w)."""
+    w = math.sqrt(max(0.0, 1.0 + m[0, 0] + m[1, 1] + m[2, 2])) / 2.0
+    x = math.copysign(math.sqrt(max(0.0, 1.0 + m[0, 0] - m[1, 1] - m[2, 2])) / 2.0, m[2, 1] - m[1, 2])
+    y = math.copysign(math.sqrt(max(0.0, 1.0 - m[0, 0] + m[1, 1] - m[2, 2])) / 2.0, m[0, 2] - m[2, 0])
+    z = math.copysign(math.sqrt(max(0.0, 1.0 - m[0, 0] - m[1, 1] + m[2, 2])) / 2.0, m[1, 0] - m[0, 1])
+    return x, y, z, w
+
+
+def fit_pose(ref, seen):
+    """Pose (R, t) mapping reference LED positions onto the seen ones (Kabsch), or None.
+
+    ref: {led id: local xyz}, origin = reference centroid; seen: {led id: world xyz}.
+    """
+    ids = [i for i in seen if i in ref]
+    if len(ids) < 3:
+        return None
+    a = np.array([ref[i] for i in ids])
+    b = np.array([seen[i] for i in ids])
+    ca, cb = a.mean(0), b.mean(0)
+    u, sv, vt = np.linalg.svd((a - ca).T @ (b - cb))
+    if sv[1] < 1e-6:  # collinear: rotation about that line is undefined
+        return None
+    d = np.sign(np.linalg.det(vt.T @ u.T))
+    rot = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
+    return rot, cb - rot @ ca
+
+
+def load_refs(ref_dir):
+    refs = {}
+    if os.path.isdir(ref_dir):
+        for fn in sorted(os.listdir(ref_dir)):
+            if fn.endswith(".json"):
+                d = json.load(open(os.path.join(ref_dir, fn)))
+                refs[d["name"]] = {int(k): np.array(v) for k, v in d["leds"].items()}
+    return refs
+
+
 def norm_name(name):
     return unquote(name).replace(" ", "").lower()
 
@@ -104,6 +147,9 @@ class PhaseSpaceRviz(Node):
         self.last_humans = 0.0
         self.seen_groups = set()
         self.bodies = {}  # group -> SMPL-X marker, sent once the group's TF exists
+        self.refs = load_refs(args.ref_dir)
+        if self.refs:
+            self.get_logger().info(f"Orientation references: {sorted(self.refs)}")
         self.smpl = None
         if args.smplx and os.path.exists(args.smplx):
             self.smpl = load_smplx(args.smplx)
@@ -214,7 +260,7 @@ class PhaseSpaceRviz(Node):
             pos = to_ros(m.x, m.y, m.z)
             gi, gname = group_of.get(m.id, (None, None))
             if gname:
-                centroids.setdefault(gname, []).append(pos)
+                centroids.setdefault(gname, {})[m.id] = pos
             sphere = Marker(ns="leds", id=m.id, type=Marker.SPHERE, action=Marker.ADD)
             sphere.header.frame_id = FRAME
             sphere.header.stamp = stamp
@@ -229,17 +275,24 @@ class PhaseSpaceRviz(Node):
         self.led_pub.publish(array)
 
         transforms, humans = [], []
-        for name, pts in centroids.items():
-            c = np.mean(pts, axis=0)
+        for name, seen in centroids.items():
+            pose = fit_pose(self.refs[name], seen) if name in self.refs else None
+            if pose:
+                rot, c = pose
+                q = matrix_to_quat(rot)
+                heading = round(math.degrees(math.atan2(rot[1, 0], rot[0, 0])), 1)
+            else:  # no reference / too few LEDs: centroid, unrotated (body faces +x)
+                c, q, heading = np.mean(list(seen.values()), axis=0), (0.0, 0.0, 0.0, 1.0), None
             t = TransformStamped()
             t.header.stamp = stamp
             t.header.frame_id = FRAME
             t.child_frame_id = name
             t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = c
-            t.transform.rotation.w = 1.0  # heading unknown from loose LEDs; body faces +x
+            r = t.transform.rotation
+            r.x, r.y, r.z, r.w = q
             transforms.append(t)
             humans.append({"name": name, "x": round(float(c[0]), 3), "y": round(float(c[1]), 3),
-                           "z": round(float(c[2]), 3), "heading_deg": None, "n_leds": len(pts)})
+                           "z": round(float(c[2]), 3), "heading_deg": heading, "n_leds": len(seen)})
         for r in rigids:
             if r.cond <= 0:
                 continue
@@ -263,6 +316,39 @@ class PhaseSpaceRviz(Node):
             self.humans_pub.publish(String(data=json.dumps({"frame": FRAME, "humans": humans})))
 
 
+def capture(owl, args):
+    """Average group LED positions for a few seconds; save them relative to their centroid."""
+    leds, samples, t_end = None, {}, time.monotonic() + args.capture_secs
+    try:
+        while time.monotonic() < t_end:
+            event = owl.nextEvent(args.timeout)
+            if leds is None:
+                leds = set(led_groups(owl, args.profile).get(args.capture, [])) or None
+            if leds and event and event.type_id == Type.FRAME and "markers" in event:
+                for m in event.markers:
+                    if m.cond > 0 and m.id in leds:
+                        samples.setdefault(m.id, []).append(to_ros(m.x, m.y, m.z))
+    finally:
+        owl.done()
+        owl.close()
+    if leds is None:
+        sys.exit(f"No LED group named {args.capture!r} in the session profile")
+    if len(samples) < 3:
+        sys.exit(f"Only LEDs {sorted(samples)} visible; need at least 3")
+    mean = {i: np.mean(p, axis=0) for i, p in samples.items()}
+    center = np.mean(list(mean.values()), axis=0)
+    os.makedirs(args.ref_dir, exist_ok=True)
+    path = os.path.join(args.ref_dir, f"{args.capture}.json")
+    json.dump({
+        "name": args.capture,
+        "captured": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "note": "LED positions (m) relative to their centroid; this layout = identity orientation (facing +x, Z up)",
+        "centroid_at_capture": [round(float(v), 4) for v in center],
+        "leds": {str(i): [round(float(v), 5) for v in p - center] for i, p in sorted(mean.items())},
+    }, open(path, "w"), indent=2)
+    print(f"Saved {path}: LEDs {sorted(mean)}, {sum(map(len, samples.values()))} samples")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--device", default="cs-phasespace.cs.umn.edu")
@@ -276,6 +362,10 @@ def main():
     parser.add_argument("--cone-length", type=float, default=3.0, help="camera view-cone length, m")
     parser.add_argument("--humans-topic", default="/phasespace/humans")
     parser.add_argument("--humans-rate", type=float, default=10.0, help="Hz")
+    parser.add_argument("--ref-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trackers"),
+                        help="orientation references (one JSON per LED group)")
+    parser.add_argument("--capture", metavar="NAME", help="record group NAME's LED layout as its reference and exit")
+    parser.add_argument("--capture-secs", type=float, default=3.0)
     args = parser.parse_args()
 
     rclpy.init()
@@ -286,6 +376,10 @@ def main():
     owl.frequency(args.freq)
     owl.streaming(2 if args.stream == "udp" else 1)
     node.get_logger().info(f"Streaming from {args.device}")
+
+    if args.capture:
+        capture(owl, args)
+        return
 
     have_cameras = False
     try:

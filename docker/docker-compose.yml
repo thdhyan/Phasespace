@@ -20,6 +20,7 @@ services:
     volumes:
       # licensed SMPL-X model: mounted read-only, never baked into the image
       - ${SMPLX_DIR:-${HOME}/Projects/HOVER/body_models/smplx}:/body_models:ro
+      - ../trackers:/ws/trackers   # orientation references (--capture writes here)
     command: >
       python3 docker/phasespace_rviz.py
       --device=${PHASESPACE_DEVICE:-cs-phasespace.cs.umn.edu}

@@ -12,6 +12,16 @@
 
 LED groups come from the active session profile (server default, or `--profile`): each microdriver in it is one person/object, named after the device (`dhyan-hat` → LEDs 0–7). Add a microdriver to the profile in the Configuration Manager and it shows up as a new group.
 
+## Orientation
+
+Each LED group gets a full pose once it has a reference layout. Put the object in the orientation that should count as "facing +x, upright", hold it still, and capture:
+
+```bash
+python3 docker/phasespace_rviz.py --capture dhyan-hat        # or: docker compose -f docker/docker-compose.yml run --rm phasespace python3 docker/phasespace_rviz.py --capture dhyan-hat
+```
+
+This writes `trackers/dhyan-hat.json` (LED positions relative to their centroid). At runtime each frame is fitted to it (Kabsch on matched LED IDs, needs >= 3 visible), which rotates the TF and the SMPL-X body and fills `heading_deg`. With no reference or fewer than 3 LEDs the TF is the plain centroid, unrotated.
+
 `phasespace` frame: origin is the alignment origin on the floor tape, Z up, metres; the floor is z = 0. PhaseSpace mm / Y-up is converted as (x, y, z) → (x, −z, y) / 1000.
 
 ## Run
