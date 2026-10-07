@@ -1793,6 +1793,11 @@ class Context:
         elif evt.type_id == Type.INT:
             self.__handle_int(evt)
         elif evt.type_id == Type.ERROR:
+            # The server reports decalibrated cameras as an error but still
+            # initializes and tracks with the remaining cameras: warn, don't fail.
+            if b"uncalibrated cameras" in bytes(evt.data):
+                print("[PhaseSpace] warning:", bytes(evt.data).decode(errors="replace"))
+                return 1
             if "initializing" in self.__properties:
                 raise InitError(evt.data)
             pass
