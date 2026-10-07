@@ -21,7 +21,7 @@ Visualization Manager:
       Length: 0.5
       Radius: 0.03
     - Class: rviz_default_plugins/MarkerArray
-      Name: Floor, cameras, bodies
+      Name: Floor, cameras
       Enabled: true
       Topic:
         Value: /phasespace_world
@@ -33,7 +33,7 @@ Visualization Manager:
       Topic:
         Value: /phasespace_leds
     - Class: rviz_default_plugins/TF
-      Name: TF (cameras, LED groups, rigids)
+      Name: TF (cameras, LED groups, LEDs, rigids)
       Enabled: true
       Show Names: true
       Show Arrows: false

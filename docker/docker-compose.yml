@@ -1,4 +1,4 @@
-# PhaseSpace LED visualization in RViz (ROS 2 Humble).
+# PhaseSpace tracker + RViz (ROS 2 Jazzy).
 # Before first run on the host:  xhost +local:docker
 # Run (from repo root):          docker compose -f docker/docker-compose.yml up --build
 x-ros: &ros
@@ -18,15 +18,12 @@ services:
   phasespace:
     <<: *ros
     volumes:
-      # licensed SMPL-X model: mounted read-only, never baked into the image
-      - ${SMPLX_DIR:-${HOME}/Projects/HOVER/body_models/smplx}:/body_models:ro
-      - ../trackers:/ws/trackers   # orientation references (--capture writes here)
+      # orientation references (--capture writes here)
+      - ../phasespace_ros2/trackers:/ws/install/phasespace_ros2/share/phasespace_ros2/trackers
     command: >
-      python3 docker/phasespace_rviz.py
-      --device=${PHASESPACE_DEVICE:-cs-phasespace.cs.umn.edu}
-      --freq=60 --stream=udp
-      --smplx=/body_models/SMPLX_NEUTRAL.npz
+      ros2 launch phasespace_ros2 phasespace.launch.py rviz:=false
+      device:=${PHASESPACE_DEVICE:-cs-phasespace.cs.umn.edu}
 
   rviz:
     <<: *ros
-    command: rviz2 -d docker/phasespace.rviz
+    command: ros2 run rviz2 rviz2 -d /ws/install/phasespace_ros2/share/phasespace_ros2/rviz/phasespace.rviz

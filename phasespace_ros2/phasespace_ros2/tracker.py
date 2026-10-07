@@ -1,23 +1,24 @@
-"""Stream PhaseSpace data to RViz and to the G1 stack.
+"""Stream PhaseSpace LEDs, LED groups, cameras and rigid trackers to ROS 2.
 
 Publishes (all in frame `phasespace`, the PhaseSpace world: origin = alignment
 origin on the floor tape, Z up, metres):
-  /phasespace_leds     MarkerArray  one sphere + ID per visible LED, coloured per microdriver
-  /phasespace_world    MarkerArray  floor plane over the camera footprint, camera view cones,
-                                    SMPL-X body per LED group (latched)
+  /phasespace_leds     MarkerArray  one sphere + ID per visible LED, coloured per LED group
+  /phasespace_world    MarkerArray  floor plane over the camera footprint, camera view cones (latched)
+  /phasespace/groups   std_msgs/String JSON (latched):
+                       {"frame", "groups": {name: {"leds": [ids], "oriented": bool}}}
   /tf_static           phasespace -> ps_cam_<id> for every calibrated camera
-  /tf                  phasespace -> <device> at the LED-group centroid (head centre),
-                       phasespace -> phasespace_<id> for rigid trackers
-  /phasespace/humans   std_msgs/String JSON, same schema as G1_sim's /sim/humans
-                       ({"frame", "humans": [{"name", "x", "y", "heading_deg"}]})
+  /tf                  phasespace -> <group>            group pose (see Orientation)
+                       phasespace -> <group>/led_<id>   every visible LED of a group (position only)
+                       phasespace -> led_<id>           visible LEDs in no group
+                       phasespace -> phasespace_<id>    rigid trackers
 
 LED groups come from the active session profile: every microdriver in it is
 one group named after the device (e.g. "dhyan-hat" -> LEDs 0-7).
 
 Orientation: `--capture NAME` records group NAME's LED layout (hold it still,
-facing +x / upright) to trackers/NAME.json. While running, each group with a
+facing +x / upright) to <ref-dir>/NAME.json. While running, each group with a
 reference is fitted to it (Kabsch on matched LED IDs, >= 3 visible), giving the
-group's full pose; without one the TF is the LED centroid with no rotation.
+group's full pose; without one the group TF is the LED centroid with no rotation.
 
 PhaseSpace is millimetres with Y up; ROS is metres with Z up, so positions map
 (x, y, z)_ps -> (x, -z, y) / 1000. Camera optical axis is the camera's local -Z.
@@ -33,15 +34,16 @@ from urllib.parse import unquote
 
 import numpy as np
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Point, TransformStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.utilities import remove_ros_args
 from std_msgs.msg import String
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Ros_2"))
-from phasespace_node_ros2 import Context, Type  # noqa: E402
+from phasespace_ros2.owl import Context, Type
 
 FRAME = "phasespace"
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -122,49 +124,28 @@ def led_groups(owl, profile):
     return {}
 
 
-def load_smplx(path):
-    """SMPL-X neutral template as (vertices, faces) in ROS axes, head centre at the origin."""
-    d = np.load(path, allow_pickle=True)
-    v, f = d["v_template"], d["f"]
-    neck_y = (d["J_regressor"] @ v)[12, 1]  # joint 12 = neck
-    head_center = v[v[:, 1] > neck_y].mean(0)
-    v = v - head_center
-    # SMPL-X: Y up, facing +Z, +X = body's left  ->  ROS: Z up, facing +X, +Y = left
-    return v[:, [2, 0, 1]], f
-
-
-class PhaseSpaceRviz(Node):
+class PhaseSpaceTracker(Node):
     def __init__(self, args):
-        super().__init__("phasespace_rviz")
+        super().__init__("phasespace_tracker")
         self.args = args
         self.led_pub = self.create_publisher(MarkerArray, "/phasespace_leds", 10)
         self.world_pub = self.create_publisher(MarkerArray, "/phasespace_world", LATCHED)
-        self.humans_pub = self.create_publisher(String, args.humans_topic, LATCHED)
+        self.groups_pub = self.create_publisher(String, "/phasespace/groups", LATCHED)
         self.tf = TransformBroadcaster(self)
         self.static_tf = StaticTransformBroadcaster(self)
         self.groups = {}
-        self.world = {}  # ns -> [Marker], republished whole on every change
-        self.last_humans = 0.0
-        self.seen_groups = set()
-        self.bodies = {}  # group -> SMPL-X marker, sent once the group's TF exists
         self.refs = load_refs(args.ref_dir)
-        if self.refs:
-            self.get_logger().info(f"Orientation references: {sorted(self.refs)}")
-        self.smpl = None
-        if args.smplx and os.path.exists(args.smplx):
-            self.smpl = load_smplx(args.smplx)
-            self.get_logger().info(f"SMPL-X body from {args.smplx}")
-        else:
-            self.get_logger().warn(f"No SMPL-X model at {args.smplx}; bodies disabled")
+        self.get_logger().info(f"Orientation references in {args.ref_dir}: {sorted(self.refs) or 'none'}")
 
-    # ---------- static world: cameras, floor, bodies ----------
+    # ---------- static world: cameras, floor ----------
     def set_cameras(self, cameras):
         cams = [c for c in cameras if c.cond > 0]
         if not cams:
             return
-        transforms, cones, labels = [], [], []
+        transforms, labels = [], []
         half = math.tan(math.radians(self.args.cam_fov) / 2.0)
         cone = Marker(ns="camera_cones", id=0, type=Marker.LINE_LIST, action=Marker.ADD)
+        cone.header.frame_id = FRAME
         cone.scale.x = 0.01
         cone.color.r, cone.color.g, cone.color.b, cone.color.a = 0.3, 0.8, 1.0, 0.35
         for c in cams:
@@ -194,6 +175,7 @@ class PhaseSpaceRviz(Node):
         xy = np.array([to_ros(*c.pose[:3])[:2] for c in cams])
         lo, hi = xy.min(0), xy.max(0)
         floor = Marker(ns="floor", id=0, type=Marker.CUBE, action=Marker.ADD)
+        floor.header.frame_id = FRAME
         floor.pose.position.x, floor.pose.position.y = (lo + hi) / 2.0
         floor.pose.position.z = -0.005
         floor.pose.orientation.w = 1.0
@@ -202,8 +184,7 @@ class PhaseSpaceRviz(Node):
         floor.color.a = 0.35
         origin = self._text("origin", 0, np.array([0.0, 0.0, 0.15]), "PhaseSpace origin", 0.15)
 
-        self.world.update(camera_cones=[cone], camera_ids=labels, floor=[floor], origin=[origin])
-        self._publish_world()
+        self.world_pub.publish(MarkerArray(markers=[cone, *labels, floor, origin]))
         self.get_logger().info(
             f"{len(cams)} cameras; floor x [{lo[0]:.2f}, {hi[0]:.2f}] y [{lo[1]:.2f}, {hi[1]:.2f}] m"
         )
@@ -211,32 +192,10 @@ class PhaseSpaceRviz(Node):
     def set_groups(self, groups):
         self.groups = groups
         self.get_logger().info(f"LED groups: {groups}")
-        if self.smpl is None:
-            return
-        v, f = self.smpl
-        bodies = []
-        for i, name in enumerate(groups):
-            mk = Marker(ns="smplx", id=i, type=Marker.TRIANGLE_LIST, action=Marker.ADD)
-            mk.header.frame_id = name
-            mk.frame_locked = True
-            mk.pose.orientation.w = 1.0
-            mk.scale.x = mk.scale.y = mk.scale.z = 1.0
-            r, g, b = GROUP_COLORS[i % len(GROUP_COLORS)]
-            mk.color.r, mk.color.g, mk.color.b, mk.color.a = r, g, b, 0.6
-            mk.points = [Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in v[f.reshape(-1)]]
-            bodies.append(mk)
-        self.bodies = dict(zip(groups, bodies))
-
-    def _publish_world(self):
-        # zero stamp: RViz uses the latest TF, which these latched markers need
-        array = MarkerArray()
-        bodies = [mk for name, mk in self.bodies.items() if name in self.seen_groups]
-        for markers in [*self.world.values(), bodies]:
-            for mk in markers:
-                if not mk.header.frame_id:
-                    mk.header.frame_id = FRAME
-                array.markers.append(mk)
-        self.world_pub.publish(array)
+        self.groups_pub.publish(String(data=json.dumps({
+            "frame": FRAME,
+            "groups": {name: {"leds": leds, "oriented": name in self.refs} for name, leds in groups.items()},
+        })))
 
     def _text(self, ns, id, pos, text, size):
         mk = Marker(ns=ns, id=id, type=Marker.TEXT_VIEW_FACING, action=Marker.ADD, text=text)
@@ -247,20 +206,31 @@ class PhaseSpaceRviz(Node):
         mk.color.r = mk.color.g = mk.color.b = mk.color.a = 1.0
         return mk
 
-    # ---------- per frame: LEDs, group centroids, rigids ----------
+    def _transform(self, stamp, child, pos, quat=(0.0, 0.0, 0.0, 1.0)):
+        t = TransformStamped()
+        t.header.stamp = stamp
+        t.header.frame_id = FRAME
+        t.child_frame_id = child
+        t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = (float(p) for p in pos)
+        r = t.transform.rotation
+        r.x, r.y, r.z, r.w = quat
+        return t
+
+    # ---------- per frame: LEDs, groups, rigids ----------
     def publish_frame(self, markers, rigids):
         stamp = self.get_clock().now().to_msg()
         group_of = {led: (i, name) for i, (name, leds) in enumerate(self.groups.items()) for led in leds}
         array = MarkerArray()
         array.markers.append(Marker(action=Marker.DELETEALL))
-        centroids = {}
+        transforms, seen_by_group = [], {}
         for m in markers:
             if m.cond <= 0:
                 continue
             pos = to_ros(m.x, m.y, m.z)
             gi, gname = group_of.get(m.id, (None, None))
             if gname:
-                centroids.setdefault(gname, {})[m.id] = pos
+                seen_by_group.setdefault(gname, {})[m.id] = pos
+            transforms.append(self._transform(stamp, f"{gname}/led_{m.id}" if gname else f"led_{m.id}", pos))
             sphere = Marker(ns="leds", id=m.id, type=Marker.SPHERE, action=Marker.ADD)
             sphere.header.frame_id = FRAME
             sphere.header.stamp = stamp
@@ -274,46 +244,19 @@ class PhaseSpaceRviz(Node):
             array.markers += [sphere, label]
         self.led_pub.publish(array)
 
-        transforms, humans = [], []
-        for name, seen in centroids.items():
+        for name, seen in seen_by_group.items():
             pose = fit_pose(self.refs[name], seen) if name in self.refs else None
             if pose:
                 rot, c = pose
-                q = matrix_to_quat(rot)
-                heading = round(math.degrees(math.atan2(rot[1, 0], rot[0, 0])), 1)
-            else:  # no reference / too few LEDs: centroid, unrotated (body faces +x)
-                c, q, heading = np.mean(list(seen.values()), axis=0), (0.0, 0.0, 0.0, 1.0), None
-            t = TransformStamped()
-            t.header.stamp = stamp
-            t.header.frame_id = FRAME
-            t.child_frame_id = name
-            t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = c
-            r = t.transform.rotation
-            r.x, r.y, r.z, r.w = q
-            transforms.append(t)
-            humans.append({"name": name, "x": round(float(c[0]), 3), "y": round(float(c[1]), 3),
-                           "z": round(float(c[2]), 3), "heading_deg": heading, "n_leds": len(seen)})
+                transforms.append(self._transform(stamp, name, c, matrix_to_quat(rot)))
+            else:  # no reference / too few LEDs: centroid, unrotated
+                transforms.append(self._transform(stamp, name, np.mean(list(seen.values()), axis=0)))
         for r in rigids:
-            if r.cond <= 0:
-                continue
-            t = TransformStamped()
-            t.header.stamp = stamp
-            t.header.frame_id = FRAME
-            t.child_frame_id = f"phasespace_{r.id}"
-            t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = to_ros(*r.pose[:3])
-            q = t.transform.rotation
-            q.x, q.y, q.z, q.w = quat_to_ros(*r.pose[3:7])
-            transforms.append(t)
+            if r.cond > 0:
+                transforms.append(self._transform(stamp, f"phasespace_{r.id}", to_ros(*r.pose[:3]),
+                                                  quat_to_ros(*r.pose[3:7])))
         if transforms:
             self.tf.sendTransform(transforms)
-        if not set(centroids) <= self.seen_groups:
-            self.seen_groups |= set(centroids)
-            self._publish_world()
-
-        now = time.monotonic()
-        if now - self.last_humans >= 1.0 / self.args.humans_rate:
-            self.last_humans = now
-            self.humans_pub.publish(String(data=json.dumps({"frame": FRAME, "humans": humans})))
 
 
 def capture(owl, args):
@@ -356,20 +299,16 @@ def main():
     parser.add_argument("--stream", choices=("tcp", "udp"), default="udp")
     parser.add_argument("--timeout", type=int, default=5000000)
     parser.add_argument("--profile", default=None, help="session profile name (default: server default)")
-    parser.add_argument("--smplx", default=os.environ.get(
-        "SMPLX_MODEL", os.path.expanduser("~/Projects/HOVER/body_models/smplx/SMPLX_NEUTRAL.npz")))
     parser.add_argument("--cam-fov", type=float, default=60.0, help="camera view-cone full angle, deg")
     parser.add_argument("--cone-length", type=float, default=3.0, help="camera view-cone length, m")
-    parser.add_argument("--humans-topic", default="/phasespace/humans")
-    parser.add_argument("--humans-rate", type=float, default=10.0, help="Hz")
-    parser.add_argument("--ref-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trackers"),
-                        help="orientation references (one JSON per LED group)")
+    parser.add_argument("--ref-dir", default=os.path.join(get_package_share_directory("phasespace_ros2"), "trackers"),
+                        help="orientation references, one JSON per LED group (default: installed trackers/)")
     parser.add_argument("--capture", metavar="NAME", help="record group NAME's LED layout as its reference and exit")
     parser.add_argument("--capture-secs", type=float, default=3.0)
-    args = parser.parse_args()
+    args = parser.parse_args(remove_ros_args(sys.argv)[1:])
 
     rclpy.init()
-    node = PhaseSpaceRviz(args)
+    node = PhaseSpaceTracker(args)
     owl = Context()
     owl.open(args.device, f"timeout={args.timeout}")
     owl.initialize(f"timeout={args.timeout} event.cameras=1 event.markers=1 event.rigids=1")
@@ -410,7 +349,7 @@ def main():
         owl.done()
         owl.close()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":
