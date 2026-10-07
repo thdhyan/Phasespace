@@ -5,27 +5,41 @@ Visualization Manager:
   Class: ""
   Displays:
     - Class: rviz_default_plugins/Grid
-      Name: Grid
+      Name: Grid (1 m)
       Enabled: true
-      Cell Size: 0.5
-      Plane Cell Count: 20
+      Reference Frame: phasespace
+      Cell Size: 1
+      Plane Cell Count: 14
+      Offset:
+        X: 2
+        Y: 1
+        Z: 0
     - Class: rviz_default_plugins/Axes
-      Name: Origin
+      Name: PhaseSpace origin
       Enabled: true
-      Length: 0.3
-      Radius: 0.02
-      Reference Frame: map
+      Reference Frame: phasespace
+      Length: 0.5
+      Radius: 0.03
     - Class: rviz_default_plugins/MarkerArray
-      Name: PhaseSpace LEDs
+      Name: Floor, cameras, bodies
+      Enabled: true
+      Topic:
+        Value: /phasespace_world
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/MarkerArray
+      Name: LEDs
       Enabled: true
       Topic:
         Value: /phasespace_leds
     - Class: rviz_default_plugins/TF
-      Name: Rigid trackers
+      Name: TF (cameras, LED groups, rigids)
       Enabled: true
       Show Names: true
+      Show Arrows: false
+      Marker Scale: 0.6
   Global Options:
-    Fixed Frame: map
+    Fixed Frame: phasespace
     Background Color: 48; 48; 48
     Frame Rate: 30
   Tools:
@@ -34,13 +48,13 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 8
+      Distance: 14
       Focal Point:
-        X: 0
-        Y: 0
+        X: 2
+        Y: 1
         Z: 0.5
-      Pitch: 0.6
-      Yaw: 0.8
+      Pitch: 0.7
+      Yaw: 3.9
 Window Geometry:
   Width: 1400
   Height: 900

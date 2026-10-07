@@ -17,10 +17,14 @@ x-ros: &ros
 services:
   phasespace:
     <<: *ros
+    volumes:
+      # licensed SMPL-X model: mounted read-only, never baked into the image
+      - ${SMPLX_DIR:-${HOME}/Projects/HOVER/body_models/smplx}:/body_models:ro
     command: >
       python3 docker/phasespace_rviz.py
       --device=${PHASESPACE_DEVICE:-cs-phasespace.cs.umn.edu}
       --freq=60 --stream=udp
+      --smplx=/body_models/SMPLX_NEUTRAL.npz
 
   rviz:
     <<: *ros
