@@ -25,6 +25,10 @@ ros2 launch phasespace_ros2 phasespace.launch.py rviz:=false profile:="Dhyan Hat
 
 `Ros_1/` has a `COLCON_IGNORE` (catkin packages). `phasespace_ros2/owl.py` is a symlink to the OWL client `Ros_2/phasespace_node_ros2.py`.
 
+## Uncalibrated cameras
+
+The server reports an uncalibrated camera as an *error* event (e.g. `1 uncalibrated cameras detected: 12`) but still initializes and tracks with the remaining cameras. The client treats that one event as a warning and drops it, so the tracker connects and runs instead of dying — you lose that camera's data, not the session. Every other init error stays fatal. Uncalibrated cameras are skipped in `/tf_static` and in the camera view cones (their condition number is ≤ 0).
+
 ## Orientation
 
 Each LED group gets a full pose once it has a reference layout. Put the object in the orientation that should count as "facing +x, upright", hold it still, and capture into the source tree, then rebuild:

@@ -38,6 +38,7 @@ Notes
 
 - Only perform calibration when you understand the hardware steps. Incorrect calibration can affect measurements for all users.
 - If you're unsure, contact the lab contacts listed in the main `README.md` before proceeding.
+- An uncalibrated camera is not a blocker: the server reports it as an error event but keeps tracking with the rest, and the clients here treat that event as a warning. You lose that camera's data until it is recalibrated, not the whole session.
 
 End of calibration procedure.
 ````
