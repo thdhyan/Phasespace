@@ -43,7 +43,12 @@ from std_msgs.msg import String
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
-from phasespace_ros2.owl import Context, Type
+from phasespace_ros2.owl import (
+    Context,
+    Type,
+    error_text,
+    is_uncalibrated_camera_error,
+)
 
 FRAME = "phasespace"
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -341,7 +346,15 @@ def main():
                 rigids = event.rigids if "rigids" in event else []
                 node.publish_frame(markers, rigids)
             elif event.type_id == Type.ERROR:
-                node.get_logger().error(f"PhaseSpace error: {event.data}")
+                # An uncalibrated camera is reported as an error, but the server
+                # keeps tracking with the remaining cameras: warn and carry on.
+                if is_uncalibrated_camera_error(event.data):
+                    node.get_logger().warning(
+                        f"PhaseSpace: {error_text(event.data)} - "
+                        "continuing with the remaining cameras"
+                    )
+                    continue
+                node.get_logger().error(f"PhaseSpace error: {error_text(event.data)}")
                 break
     except KeyboardInterrupt:
         pass

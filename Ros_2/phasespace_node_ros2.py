@@ -228,6 +228,26 @@ class InitError(OWLError):
     pass
 
 
+def error_text(data):
+    """Readable text of an ERROR event payload (bytes or str)."""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    return bytes(data).decode(errors="replace")
+
+
+def is_uncalibrated_camera_error(data):
+    """True if the error event only complains about uncalibrated cameras.
+
+    The server reports e.g. "1 uncalibrated cameras detected: 12" as an error
+    event even though it still initializes and tracks with the remaining
+    cameras. Such an event must not be fatal: the rig works, it just loses the
+    data from that camera until it is recalibrated.
+    """
+    return "uncalibrated camera" in error_text(data)
+
+
 class Event:
     """
     The primary data structure returned by the server. An Event instance stores
@@ -1732,8 +1752,14 @@ class Context:
     def __process_event(self, evt):
         # handle internal events
         if evt.id == 0:
-            if evt.type_id == Type.ERROR and "initializing" in self.__properties:
-                raise InitError(evt.data)
+            if evt.type_id == Type.ERROR:
+                # The server reports uncalibrated cameras as an error but still
+                # initializes and tracks with the remaining cameras: warn, don't fail.
+                if is_uncalibrated_camera_error(evt.data):
+                    print("[PhaseSpace] warning:", error_text(evt.data))
+                    return 0
+                if "initializing" in self.__properties:
+                    raise InitError(evt.data)
             if evt.type_id != Type.BYTE:
                 sys.stderr.write(
                     "warning: unknown event: type=%d id=%d" % (evt.type_id, evt.id)
@@ -1795,8 +1821,8 @@ class Context:
         elif evt.type_id == Type.ERROR:
             # The server reports decalibrated cameras as an error but still
             # initializes and tracks with the remaining cameras: warn, don't fail.
-            if b"uncalibrated cameras" in bytes(evt.data):
-                print("[PhaseSpace] warning:", bytes(evt.data).decode(errors="replace"))
+            if is_uncalibrated_camera_error(evt.data):
+                print("[PhaseSpace] warning:", error_text(evt.data))
                 return 1
             if "initializing" in self.__properties:
                 raise InitError(evt.data)
